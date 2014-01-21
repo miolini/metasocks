@@ -87,7 +87,7 @@ func (m *Metasocks) serverRun() {
  
 	for {
 		conn, err := listener.Accept()
-		log.Printf("new connection from %s", conn)
+		// log.Printf("new connection from %s", conn)
 		if err != nil {
 			log.Printf("Error accept: %s", err.Error())
 			return
@@ -109,7 +109,7 @@ func Pipe(connIn net.Conn, connOut net.Conn) {
 		if err != nil {
 			break
 		}
-		log.Printf("readed %d bytes", n)
+		// log.Printf("readed %d bytes", n)
 		n, err = connOut.Write(buf[:n])
 		if err != nil {
 			break
