@@ -41,6 +41,7 @@ func (m *Metasocks) Run(serverAddr string, tor string, torData string, num int) 
 	m.num = num
 	m.serverAddr = serverAddr
 	os.Mkdir(torData, 0755)
+	go m.serverRun()
 	for i:=0; i<num; i++ {
 		confPath := fmt.Sprintf("%s/tor_%d.conf", torData, i)
 		addr := fmt.Sprintf("127.0.0.1:%d", 17001+i)
@@ -51,7 +52,7 @@ func (m *Metasocks) Run(serverAddr string, tor string, torData string, num int) 
 		go func(torNum int) {
 			var err error
 			for true {
-				log.Printf("tor instance %d starting", torNum)
+				log.Printf("tor instance %d starting...", torNum)
 				cmd := exec.Command(tor, "-f", confPath)
 				stdout, _ := cmd.StdoutPipe()
 				err = cmd.Start()
@@ -63,9 +64,9 @@ func (m *Metasocks) Run(serverAddr string, tor string, torData string, num int) 
 				scanner := bufio.NewScanner(stdout)
 				for scanner.Scan() {
 					line := scanner.Text()
-					// log.Printf(line)
 					if match, _ := regexp.Match("100%", []byte(line)); match {
 						log.Printf("tor instance %d started", torNum)
+						break
 					}
 				}
 				cmd.Wait()
@@ -73,7 +74,7 @@ func (m *Metasocks) Run(serverAddr string, tor string, torData string, num int) 
 			}	
 		}(i)
 	}
-	m.serverRun()
+	<- make(chan bool)
 }
 
 func (m *Metasocks) serverRun() {
@@ -96,17 +97,29 @@ func (m *Metasocks) serverRun() {
 }
 
 func Pipe(connIn net.Conn, connOut net.Conn) {
+	var (
+		n int
+		err error
+	)
+	defer connIn.Close()
+	defer connOut.Close()
 	buf := make([]byte, 2048)
-	log.Printf("start pipe %s to %s", connIn, connOut)
-	for n, err := connIn.Read(buf); err != nil; {
+	for true {
+		n, err = connIn.Read(buf)
+		if err != nil {
+			break
+		}
 		log.Printf("readed %d bytes", n)
-		connOut.Write(buf[:n])	
+		n, err = connOut.Write(buf[:n])
+		if err != nil {
+			break
+		}
 	}
 }
 
 func (m *Metasocks) clientProcess(conn net.Conn) {
 	addr := m.instances[rand.Int() % len(m.instances)]
-	remoteConn, err := net.Dial("tcp", addr)
+	remoteConn, err := net.Dial("tcp4", addr)
 	if err != nil {
 		log.Printf("can't connect to %s", addr)
 		conn.Close()
