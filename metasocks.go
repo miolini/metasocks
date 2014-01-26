@@ -64,6 +64,7 @@ func (m *Metasocks) Run(serverAddr string, tor string, torData string, num int) 
 				scanner := bufio.NewScanner(stdout)
 				for scanner.Scan() {
 					line := scanner.Text()
+					//log.Printf(line)
 					if match, _ := regexp.Match("100%", []byte(line)); match {
 						log.Printf("tor instance %d started", torNum)
 						break
@@ -90,7 +91,7 @@ func (m *Metasocks) serverRun() {
 		// log.Printf("new connection from %s", conn)
 		if err != nil {
 			log.Printf("Error accept: %s", err.Error())
-			return
+			continue
 		}
 		go m.clientProcess(conn)
 	}
