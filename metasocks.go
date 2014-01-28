@@ -132,24 +132,30 @@ func (m *Metasocks) clientProcess(conn net.Conn) {
 }
 
 func main() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
 	var (
 		tor	string
 		torData string
 		num int
 		serverAddr string
 		metasocks Metasocks
+	    cores int
 	)
 
 	flag.StringVar(&tor, "tor", "tor", "path to tor executable")
 	flag.StringVar(&torData, "tor-data", "data", "path to tor data dirs")
 	flag.IntVar(&num, "num", 10, "number of runned tor instances")
 	flag.StringVar(&serverAddr, "server", "127.0.0.1:12050", "proxy listen on this host:port")
+	flag.IntVar(&cores, "cores", 1, "cpu cores use")
 	flag.Parse()
 
-	log.Printf("tor:  %s", tor)
-	log.Printf("num:  %d", num)
+	log.Printf("tor:        %s", tor)
+	log.Printf("torData:    %s", torData)
+	log.Printf("num:        %d", num)
+	log.Printf("serverAddr: %s", serverAddr)
+	log.Printf("cores:      %d", cores)
 
-	log.Printf("Multisocks starting...")
+	log.Printf("Metasocks starting...")
+
+	runtime.GOMAXPROCS(cores)
 	metasocks.Run(serverAddr, tor, torData, num)
 }
