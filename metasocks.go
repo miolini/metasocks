@@ -43,6 +43,7 @@ func (m *Metasocks) Run(serverAddr string, tor string, torData string, num int) 
 	os.Mkdir(torData, 0755)
 	go m.serverRun()
 	for i:=0; i<num; i++ {
+		time.Sleep(time.Millisecond * 25)
 		confPath := fmt.Sprintf("%s/tor_%d.conf", torData, i)
 		addr := fmt.Sprintf("127.0.0.1:%d", 17001+i)
 		m.instances = append(m.instances, addr)
