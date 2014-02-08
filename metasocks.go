@@ -31,7 +31,7 @@ func (m* Metasocks) CreateTorConfig(path string, socksAddr string, dataDir strin
 	config += fmt.Sprintf("SOCKSPort %s\n", socksAddr)
 	config += fmt.Sprintf("DataDirectory %s\n", dataDir)
 	config += fmt.Sprintf("HardwareAccel 1\n")
-	config += fmt.Sprintf("AvoidDiskWrites 1\n")
+	config += fmt.Sprintf("AvoidDiskWrites 0\n")
 	err := ioutil.WriteFile(path, []byte(config), 0644)
 	CheckError(err)
 }
@@ -51,8 +51,8 @@ func (m *Metasocks) Run(serverAddr string, tor string, torData string, num int) 
 		m.CreateTorConfig(confPath, addr, dir)
 		
 		go func(torNum int) {
-			var err error
-			for true {
+			var err error	
+		    for true {
 				log.Printf("tor instance %d starting...", torNum)
 				cmd := exec.Command(tor, "-f", confPath)
 				stdout, _ := cmd.StdoutPipe()
