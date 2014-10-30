@@ -36,7 +36,7 @@ func (m* Metasocks) CreateTorConfig(path string, socksAddr string, dataDir strin
 	CheckError(err)
 }
 
-func (m *Metasocks) Run(serverAddr string, tor string, torData string, num int) {
+func (m *Metasocks) Run(serverAddr string, tor string, torData string, torAddr string, torPortBegin int, num int) {
 	m.tor = tor
 	m.num = num
 	m.serverAddr = serverAddr
@@ -45,7 +45,7 @@ func (m *Metasocks) Run(serverAddr string, tor string, torData string, num int) 
 	for i:=0; i<num; i++ {
 		time.Sleep(time.Millisecond * 25)
 		confPath := fmt.Sprintf("%s/tor_%d.conf", torData, i)
-		addr := fmt.Sprintf("127.0.0.1:%d", 17001+i)
+		addr := fmt.Sprintf("%s:%d", torAddr, torPortBegin+i)
 		m.instances = append(m.instances, addr)
 		dir := fmt.Sprintf("%s/%d", torData, i)
 		m.CreateTorConfig(confPath, addr, dir)
@@ -139,6 +139,8 @@ func main() {
 		serverAddr string
 		metasocks Metasocks
 	    cores int
+	    torAddr string
+	    torPortBegin int
 	)
 
 	flag.StringVar(&tor, "tor", "tor", "path to tor executable")
@@ -146,6 +148,8 @@ func main() {
 	flag.IntVar(&num, "num", 10, "number of runned tor instances")
 	flag.StringVar(&serverAddr, "server", "127.0.0.1:12050", "proxy listen on this host:port")
 	flag.IntVar(&cores, "cores", 1, "cpu cores use")
+	flag.StringVar(&torAddr, "tor-addr", "127.0.0.1", "tor listen addr")
+	flag.IntVar(&torPortBegin, "tor-port-begin", 17001, "tor port begin")
 	flag.Parse()
 
 	log.Printf("tor:        %s", tor)
@@ -157,5 +161,5 @@ func main() {
 	log.Printf("Metasocks starting...")
 
 	runtime.GOMAXPROCS(cores)
-	metasocks.Run(serverAddr, tor, torData, num)
+	metasocks.Run(serverAddr, tor, torData, torAddr, torPortBegin, num)
 }
