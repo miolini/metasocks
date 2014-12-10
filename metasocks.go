@@ -166,5 +166,9 @@ func main() {
 	log.Printf("Metasocks starting...")
 
 	runtime.GOMAXPROCS(cores)
+
+	if num == 0 {
+		log.Fatal("err: num must be great than zero")
+	}
 	metasocks.Run(serverAddr, tor, torData, torAddr, torPortBegin, num)
 }
