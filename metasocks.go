@@ -14,19 +14,19 @@ import "net"
 import "math/rand"
 
 func CheckError(err error) {
-    if err != nil {
-        log.Fatal(err)
-    }
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 type Metasocks struct {
-	tor string
-	num int
+	tor        string
+	num        int
 	serverAddr string
-	instances []string
+	instances  []string
 }
 
-func (m* Metasocks) CreateTorConfig(path string, socksAddr string, dataDir string) {
+func (m *Metasocks) CreateTorConfig(path string, socksAddr string, dataDir string) {
 	config := ""
 	config += fmt.Sprintf("SOCKSPort %s\n", socksAddr)
 	config += fmt.Sprintf("DataDirectory %s\n", dataDir)
@@ -42,17 +42,17 @@ func (m *Metasocks) Run(serverAddr string, tor string, torData string, torAddr s
 	m.serverAddr = serverAddr
 	os.Mkdir(torData, 0755)
 	go m.serverRun()
-	for i:=0; i<num; i++ {
+	for i := 0; i < num; i++ {
 		time.Sleep(time.Millisecond * 25)
 		confPath := fmt.Sprintf("%s/tor_%d.conf", torData, i)
 		addr := fmt.Sprintf("%s:%d", torAddr, torPortBegin+i)
 		m.instances = append(m.instances, addr)
 		dir := fmt.Sprintf("%s/%d", torData, i)
 		m.CreateTorConfig(confPath, addr, dir)
-		
+
 		go func(torNum int) {
-			var err error	
-		    for true {
+			var err error
+			for true {
 				log.Printf("tor instance %d starting...", torNum)
 				cmd := exec.Command(tor, "-f", confPath)
 				stdout, _ := cmd.StdoutPipe()
@@ -73,10 +73,10 @@ func (m *Metasocks) Run(serverAddr string, tor string, torData string, torAddr s
 				}
 				cmd.Wait()
 				log.Printf("tor instance %d stopped", torNum)
-			}	
+			}
 		}(i)
 	}
-	<- make(chan bool)
+	<-make(chan bool)
 }
 
 func (m *Metasocks) serverRun() {
@@ -86,7 +86,7 @@ func (m *Metasocks) serverRun() {
 		log.Printf("error listening: %s", err.Error())
 		os.Exit(1)
 	}
- 
+
 	for {
 		conn, err := listener.Accept()
 		// log.Printf("new connection from %s", conn)
@@ -100,7 +100,7 @@ func (m *Metasocks) serverRun() {
 
 func Pipe(connIn net.Conn, connOut net.Conn) {
 	var (
-		n int
+		n   int
 		err error
 	)
 	defer connIn.Close()
@@ -120,7 +120,12 @@ func Pipe(connIn net.Conn, connOut net.Conn) {
 }
 
 func (m *Metasocks) clientProcess(conn net.Conn) {
-	addr := m.instances[rand.Int() % len(m.instances)]
+	if len(m.instances) == 0 {
+		log.Printf("WARNING: close client connection because no one tor instance in pool right now")
+		conn.Close()
+		return
+	}
+	addr := m.instances[rand.Int()%len(m.instances)]
 	remoteConn, err := net.Dial("tcp4", addr)
 	if err != nil {
 		log.Printf("can't connect to %s", addr)
@@ -133,14 +138,14 @@ func (m *Metasocks) clientProcess(conn net.Conn) {
 
 func main() {
 	var (
-		tor	string
-		torData string
-		num int
-		serverAddr string
-		metasocks Metasocks
-	    cores int
-	    torAddr string
-	    torPortBegin int
+		tor          string
+		torData      string
+		num          int
+		serverAddr   string
+		metasocks    Metasocks
+		cores        int
+		torAddr      string
+		torPortBegin int
 	)
 
 	flag.StringVar(&tor, "tor", "tor", "path to tor executable")
