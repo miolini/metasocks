@@ -6,6 +6,7 @@ import "flag"
 import "io/ioutil"
 import "os"
 import "os/exec"
+import "os/signal"
 import "runtime"
 import "time"
 import "bufio"
@@ -24,59 +25,80 @@ type Metasocks struct {
 	num        int
 	serverAddr string
 	instances  []string
+	stopped    bool
+	processes  map[int]*os.Process
 }
 
-func (m *Metasocks) CreateTorConfig(path string, socksAddr string, dataDir string) {
+func (m *Metasocks) CreateTorConfig(path string, socksAddr string, dataDir string) error {
 	config := ""
 	config += fmt.Sprintf("SOCKSPort %s\n", socksAddr)
 	config += fmt.Sprintf("DataDirectory %s\n", dataDir)
 	config += fmt.Sprintf("HardwareAccel 1\n")
 	config += fmt.Sprintf("AvoidDiskWrites 0\n")
-	err := ioutil.WriteFile(path, []byte(config), 0644)
-	CheckError(err)
+	return ioutil.WriteFile(path, []byte(config), 0644)
 }
 
-func (m *Metasocks) Run(serverAddr string, tor string, torData string, torAddr string, torPortBegin int, num int) {
+func (m *Metasocks) Run(serverAddr, tor, torData, torAddr string, torPortBegin int, num int) error {
 	m.tor = tor
 	m.num = num
 	m.serverAddr = serverAddr
 	os.Mkdir(torData, 0755)
 	go m.serverRun()
+	m.processes = make(map[int]*os.Process)
 	for i := 0; i < num; i++ {
 		time.Sleep(time.Millisecond * 25)
-		confPath := fmt.Sprintf("%s/tor_%d.conf", torData, i)
 		addr := fmt.Sprintf("%s:%d", torAddr, torPortBegin+i)
+		confPath := fmt.Sprintf("%s/tor_%d.conf", torData, i)
 		m.instances = append(m.instances, addr)
 		dir := fmt.Sprintf("%s/%d", torData, i)
-		m.CreateTorConfig(confPath, addr, dir)
-
-		go func(torNum int) {
-			var err error
-			for true {
-				log.Printf("tor instance %d starting...", torNum)
-				cmd := exec.Command(tor, "-f", confPath)
-				stdout, _ := cmd.StdoutPipe()
-				err = cmd.Start()
-				if err != nil {
-					log.Printf("tor instance %d error: %s", torNum, err)
-					time.Sleep(time.Second * 5)
-					continue
-				}
-				scanner := bufio.NewScanner(stdout)
-				for scanner.Scan() {
-					line := scanner.Text()
-					//log.Printf(line)
-					if match, _ := regexp.Match("100%", []byte(line)); match {
-						log.Printf("tor instance %d started", torNum)
-						break
-					}
-				}
-				cmd.Wait()
-				log.Printf("tor instance %d stopped", torNum)
-			}
-		}(i)
+		if err := m.CreateTorConfig(confPath, addr, dir); err != nil {
+			m.stopProcesses()
+			return err
+		}
+		go m.runTor(i, tor, addr, confPath)
 	}
-	<-make(chan bool)
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, os.Kill)
+	s := <-c
+	log.Printf("exit, got signal: %s", s)
+	m.stopProcesses()
+	return nil
+}
+
+func (m *Metasocks) runTor(torNum int, tor, addr, confPath string) {
+	var err error	
+	for !m.stopped {
+		log.Printf("tor instance %d starting...", torNum)
+		cmd := exec.Command(tor, "-f", confPath)
+		stdout, _ := cmd.StdoutPipe()
+		err = cmd.Start()
+		if err != nil {
+			log.Printf("tor instance %d error: %s", torNum, err)
+			time.Sleep(time.Second * 5)
+			continue
+		}
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			//log.Printf(line)
+			if match, _ := regexp.Match("100%", []byte(line)); match {
+				log.Printf("tor instance %d started", torNum)
+				break
+			}
+		}
+		m.processes[torNum] = cmd.Process
+		cmd.Wait()
+		log.Printf("tor instance %d stopped", torNum)
+	}
+}
+
+func (m *Metasocks) stopProcesses() {
+	m.stopped = true
+	for num, process := range m.processes {
+		log.Printf("kill tor #%d (pid %d)", num, process.Pid)
+		process.Kill()
+	}
 }
 
 func (m *Metasocks) serverRun() {
