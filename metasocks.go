@@ -148,8 +148,9 @@ func (m *Metasocks) checkExternalIP(torProcess *TorProcess) error {
 	ip := string(data)
 	m.processesMutex.Lock()
 	for _, proc := range m.processes {
-		if proc.ExternalIp == ip {
+		if proc != nil && proc.ExternalIp == ip {
 			err = fmt.Errorf("duplicate external ip for tor %d: %s", torProcess.Num, ip)
+			break
 		}
 	}
 	if err == nil {
@@ -179,6 +180,7 @@ func (m *Metasocks) runTor(torNum int, tor, dataDir string, torAddr string, torP
 	defer func() {
 		os.RemoveAll(confPath)
 		os.RemoveAll(dir)
+
 	}()
 
 	for !m.stopped {
@@ -186,15 +188,14 @@ func (m *Metasocks) runTor(torNum int, tor, dataDir string, torAddr string, torP
 
 		cmd := exec.Command(tor, "-f", confPath)
 		torProcess := &TorProcess{Num: torNum, ListenAddr: addr, Cmd: cmd}
-		m.processes[torNum] = torProcess
 		stdout, _ := cmd.StdoutPipe()
 		err = cmd.Start()
-
 		if err != nil {
 			log.Printf("tor instance %d error: %s", torNum, err)
 			time.Sleep(time.Second * 5)
 			continue
 		}
+
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -207,16 +208,23 @@ func (m *Metasocks) runTor(torNum int, tor, dataDir string, torAddr string, torP
 
 		err = m.checkExternalIP(torProcess)
 		if err != nil {
-			cmd.Process.Kill()
-			return err
-		}
+			if err = cmd.Process.Kill(); err != nil {
+				log.Printf("tor instance %d kill err: %s", torNum, err)
+			}
 
+		}
+		m.processesMutex.Lock()
+		m.processes[torNum] = torProcess
+		m.processesMutex.Unlock()
 		err = cmd.Wait()
 		if err != nil {
 			log.Printf("tor instance %d wait err: %s", torNum, err)
 		} else {
 			log.Printf("tor instance %d stopped", torNum)
 		}
+		m.processesMutex.Lock()
+		m.processes[torNum] = nil
+		m.processesMutex.Unlock()
 	}
 	return nil
 }
@@ -225,6 +233,9 @@ func (m *Metasocks) stopProcesses() {
 	log.Printf("stop all tor instances")
 	m.stopped = true
 	for num, process := range m.processes {
+		if process == nil {
+			continue
+		}
 		log.Printf("kill tor #%d (pid %d)", num, process.Cmd.Process.Pid)
 		err := process.Cmd.Process.Kill()
 		if err != nil {
