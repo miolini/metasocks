@@ -13,6 +13,7 @@ import "bufio"
 import "regexp"
 import "net"
 import "math/rand"
+import "sync"
 
 func CheckError(err error) {
 	if err != nil {
@@ -26,7 +27,8 @@ type Metasocks struct {
 	serverAddr string
 	instances  []string
 	stopped    bool
-	processes  map[int]*os.Process
+	processes  map[int]*exec.Cmd
+	waitGroup  *sync.WaitGroup
 }
 
 func (m *Metasocks) CreateTorConfig(path string, socksAddr string, dataDir string) error {
@@ -39,12 +41,27 @@ func (m *Metasocks) CreateTorConfig(path string, socksAddr string, dataDir strin
 }
 
 func (m *Metasocks) Run(serverAddr, tor, torData, torAddr string, torPortBegin int, num int) error {
+	var err error
+
 	m.tor = tor
 	m.num = num
 	m.serverAddr = serverAddr
-	os.Mkdir(torData, 0755)
+	m.waitGroup = &sync.WaitGroup{}
+
+	log.Printf("cleaning dir: %s", torData)
+	err = os.RemoveAll(torData)
+	if err != nil {
+		log.Printf("warning: cannot remove tor data dir %s: %s", torData, err)
+	}
+
+	log.Printf("mkdir: %s", torData)
+	err = os.MkdirAll(torData, 0755)
+	if err != nil {
+		return fmt.Errorf("tor data dir mkdir err: %s", err)
+	}
+
 	go m.serverRun()
-	m.processes = make(map[int]*os.Process)
+	m.processes = make(map[int]*exec.Cmd)
 	for i := 0; i < num; i++ {
 		time.Sleep(time.Millisecond * 25)
 		addr := fmt.Sprintf("%s:%d", torAddr, torPortBegin+i)
@@ -55,7 +72,8 @@ func (m *Metasocks) Run(serverAddr, tor, torData, torAddr string, torPortBegin i
 			m.stopProcesses()
 			return err
 		}
-		go m.runTor(i, tor, addr, confPath)
+		m.waitGroup.Add(1)
+		go m.runTor(i, tor, addr, confPath, m.waitGroup)
 	}
 
 	c := make(chan os.Signal, 1)
@@ -63,10 +81,12 @@ func (m *Metasocks) Run(serverAddr, tor, torData, torAddr string, torPortBegin i
 	s := <-c
 	log.Printf("exit, got signal: %s", s)
 	m.stopProcesses()
+	m.waitGroup.Wait()
 	return nil
 }
 
-func (m *Metasocks) runTor(torNum int, tor, addr, confPath string) {
+func (m *Metasocks) runTor(torNum int, tor, addr, confPath string, waitGroup *sync.WaitGroup) {
+	defer waitGroup.Done()
 	var err error
 	for !m.stopped {
 		log.Printf("tor instance %d starting...", torNum)
@@ -87,17 +107,25 @@ func (m *Metasocks) runTor(torNum int, tor, addr, confPath string) {
 				break
 			}
 		}
-		m.processes[torNum] = cmd.Process
-		cmd.Wait()
-		log.Printf("tor instance %d stopped", torNum)
+		m.processes[torNum] = cmd
+		err = cmd.Wait()
+		if err != nil {
+			log.Printf("tor instance %d wait err: %s", torNum, err)	
+		} else {
+			log.Printf("tor instance %d stopped", torNum)
+		}
 	}
 }
 
 func (m *Metasocks) stopProcesses() {
+	log.Printf("stop all tor instances")
 	m.stopped = true
 	for num, process := range m.processes {
-		log.Printf("kill tor #%d (pid %d)", num, process.Pid)
-		process.Kill()
+		log.Printf("kill tor #%d (pid %d)", num, process.Process.Pid)
+		err := process.Process.Kill()
+		if err != nil {
+			log.Printf("tor instance %d kill err: %s", num, err)
+		}
 	}
 }
 
