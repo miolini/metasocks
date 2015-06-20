@@ -14,6 +14,38 @@ import "regexp"
 import "net"
 import "math/rand"
 import "sync"
+import "net/http"
+import "golang.org/x/net/proxy"
+import "io"
+
+func main() {
+	tor := flag.String("tor", "tor", "path to tor executable")
+	torData := flag.String("tor-data", "data", "path to tor data dirs")
+	num := flag.Int("num", 10, "number of runned tor instances")
+	serverAddr := flag.String("server", "127.0.0.1:12050", "proxy listen on this host:port")
+	cores := flag.Int("cores", 1, "cpu cores use")
+	torAddr := flag.String("tor-addr", "127.0.0.1", "tor listen addr")
+	torPortBegin := flag.Int("tor-port-begin", 17001, "tor port begin")
+	myipService := flag.String("myip-service", "https://icanhazip.com", "myip webservice url, that return ip as text")
+	flag.Parse()
+
+	log.Printf("tor:        %s", *tor)
+	log.Printf("torData:    %s", *torData)
+	log.Printf("num:        %d", *num)
+	log.Printf("serverAddr: %s", *serverAddr)
+	log.Printf("cores:      %d", *cores)
+	log.Printf("myip service: %s", *myipService)
+
+	log.Printf("Metasocks starting...")
+
+	runtime.GOMAXPROCS(*cores)
+
+	if *num == 0 {
+		log.Fatal("err: num must be great than zero")
+	}
+	var metasocks Metasocks
+	metasocks.Run(*serverAddr, *tor, *torData, *torAddr, *torPortBegin, *num, *myipService)
+}
 
 func CheckError(err error) {
 	if err != nil {
@@ -21,14 +53,23 @@ func CheckError(err error) {
 	}
 }
 
+type TorProcess struct {
+	Num        int
+	ListenAddr string
+	Cmd        *exec.Cmd
+	ExternalIp string
+}
+
 type Metasocks struct {
-	tor        string
-	num        int
-	serverAddr string
-	instances  []string
-	stopped    bool
-	processes  map[int]*exec.Cmd
-	waitGroup  *sync.WaitGroup
+	tor            string
+	num            int
+	serverAddr     string
+	instances      []string
+	stopped        bool
+	processes      map[int]*TorProcess
+	waitGroup      *sync.WaitGroup
+	myipService    string
+	processesMutex sync.Mutex
 }
 
 func (m *Metasocks) CreateTorConfig(path string, socksAddr string, dataDir string) error {
@@ -40,12 +81,14 @@ func (m *Metasocks) CreateTorConfig(path string, socksAddr string, dataDir strin
 	return ioutil.WriteFile(path, []byte(config), 0644)
 }
 
-func (m *Metasocks) Run(serverAddr, tor, torData, torAddr string, torPortBegin int, num int) error {
+func (m *Metasocks) Run(serverAddr, tor, torData, torAddr string,
+	torPortBegin int, num int, myipService string) error {
 	var err error
 
 	m.tor = tor
 	m.num = num
 	m.serverAddr = serverAddr
+	m.myipService = myipService
 	m.waitGroup = &sync.WaitGroup{}
 
 	log.Printf("cleaning dir: %s", torData)
@@ -61,19 +104,20 @@ func (m *Metasocks) Run(serverAddr, tor, torData, torAddr string, torPortBegin i
 	}
 
 	go m.serverRun()
-	m.processes = make(map[int]*exec.Cmd)
+	m.processes = make(map[int]*TorProcess)
 	for i := 0; i < num; i++ {
 		time.Sleep(time.Millisecond * 25)
-		addr := fmt.Sprintf("%s:%d", torAddr, torPortBegin+i)
-		confPath := fmt.Sprintf("%s/tor_%d.conf", torData, i)
-		m.instances = append(m.instances, addr)
-		dir := fmt.Sprintf("%s/%d", torData, i)
-		if err := m.CreateTorConfig(confPath, addr, dir); err != nil {
-			m.stopProcesses()
-			return err
-		}
 		m.waitGroup.Add(1)
-		go m.runTor(i, tor, addr, confPath, m.waitGroup)
+		go func(torNum int) {
+			defer m.waitGroup.Done()
+			for !m.stopped {
+				err := m.runTor(torNum, tor, torData, torAddr, torPortBegin+torNum)
+				if err != nil {
+					log.Printf("run tor err: %s", err)
+				}
+				time.Sleep(time.Second)
+			}
+		}(i)
 	}
 
 	c := make(chan os.Signal, 1)
@@ -82,17 +126,70 @@ func (m *Metasocks) Run(serverAddr, tor, torData, torAddr string, torPortBegin i
 	log.Printf("exit, got signal: %s", s)
 	m.stopProcesses()
 	m.waitGroup.Wait()
+	os.RemoveAll(torData)
 	return nil
 }
 
-func (m *Metasocks) runTor(torNum int, tor, addr, confPath string, waitGroup *sync.WaitGroup) {
-	defer waitGroup.Done()
+func (m *Metasocks) checkExternalIP(torProcess *TorProcess) error {
+	socks5Proxy, err := proxy.SOCKS5("tcp", torProcess.ListenAddr, nil, proxy.Direct)
+	if err != nil {
+		return fmt.Errorf("create socks5 conn for tor %d err: %s", torProcess.Num, err)
+	}
+	httpClient := &http.Client{Transport: &http.Transport{Dial: socks5Proxy.Dial}}
+	res, err := httpClient.Get(m.myipService)
+	if err != nil {
+		return fmt.Errorf("get external ip for tor %d err: %s", torProcess.Num, err)
+	}
+	defer res.Body.Close()
+	data, err := ioutil.ReadAll(&io.LimitedReader{res.Body, 20})
+	if err != nil {
+		return fmt.Errorf("read response with external ip for tor %d err: %s", torProcess.Num, err)
+	}
+	ip := string(data)
+	m.processesMutex.Lock()
+	for _, proc := range m.processes {
+		if proc.ExternalIp == ip {
+			err = fmt.Errorf("duplicate external ip for tor %d: %s", torProcess.Num, ip)
+		}
+	}
+	if err == nil {
+		torProcess.ExternalIp = ip
+	}
+	m.processesMutex.Unlock()
+	if err != nil {
+		return err
+	}
+	log.Printf("ip for num %d: %s", torProcess.Num, ip)
+	return nil
+}
+
+func (m *Metasocks) runTor(torNum int, tor, dataDir string, torAddr string, torPort int) error {
 	var err error
+
+	addr := fmt.Sprintf("%s:%d", torAddr, torPort)
+	confPath := fmt.Sprintf("%s/tor_%d.conf", dataDir, torNum)
+	m.instances = append(m.instances, addr)
+	dir := fmt.Sprintf("%s/%d", dataDir, torNum)
+	if err = os.RemoveAll(dir); err != nil {
+		return err
+	}
+	if err = m.CreateTorConfig(confPath, addr, dir); err != nil {
+		return err
+	}
+	defer func() {
+		os.RemoveAll(confPath)
+		os.RemoveAll(dir)
+	}()
+
 	for !m.stopped {
 		log.Printf("tor instance %d starting...", torNum)
+
 		cmd := exec.Command(tor, "-f", confPath)
+		torProcess := &TorProcess{Num: torNum, ListenAddr: addr, Cmd: cmd}
+		m.processes[torNum] = torProcess
 		stdout, _ := cmd.StdoutPipe()
 		err = cmd.Start()
+
 		if err != nil {
 			log.Printf("tor instance %d error: %s", torNum, err)
 			time.Sleep(time.Second * 5)
@@ -101,28 +198,35 @@ func (m *Metasocks) runTor(torNum int, tor, addr, confPath string, waitGroup *sy
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			//log.Printf(line)
+			// log.Printf(line)
 			if match, _ := regexp.Match("100%", []byte(line)); match {
 				log.Printf("tor instance %d started", torNum)
 				break
 			}
 		}
-		m.processes[torNum] = cmd
+
+		err = m.checkExternalIP(torProcess)
+		if err != nil {
+			cmd.Process.Kill()
+			return err
+		}
+
 		err = cmd.Wait()
 		if err != nil {
-			log.Printf("tor instance %d wait err: %s", torNum, err)	
+			log.Printf("tor instance %d wait err: %s", torNum, err)
 		} else {
 			log.Printf("tor instance %d stopped", torNum)
 		}
 	}
+	return nil
 }
 
 func (m *Metasocks) stopProcesses() {
 	log.Printf("stop all tor instances")
 	m.stopped = true
 	for num, process := range m.processes {
-		log.Printf("kill tor #%d (pid %d)", num, process.Process.Pid)
-		err := process.Process.Kill()
+		log.Printf("kill tor #%d (pid %d)", num, process.Cmd.Process.Pid)
+		err := process.Cmd.Process.Kill()
 		if err != nil {
 			log.Printf("tor instance %d kill err: %s", num, err)
 		}
@@ -184,41 +288,4 @@ func (m *Metasocks) clientProcess(conn net.Conn) {
 	}
 	go Pipe(conn, remoteConn)
 	go Pipe(remoteConn, conn)
-}
-
-func main() {
-	var (
-		tor          string
-		torData      string
-		num          int
-		serverAddr   string
-		metasocks    Metasocks
-		cores        int
-		torAddr      string
-		torPortBegin int
-	)
-
-	flag.StringVar(&tor, "tor", "tor", "path to tor executable")
-	flag.StringVar(&torData, "tor-data", "data", "path to tor data dirs")
-	flag.IntVar(&num, "num", 10, "number of runned tor instances")
-	flag.StringVar(&serverAddr, "server", "127.0.0.1:12050", "proxy listen on this host:port")
-	flag.IntVar(&cores, "cores", 1, "cpu cores use")
-	flag.StringVar(&torAddr, "tor-addr", "127.0.0.1", "tor listen addr")
-	flag.IntVar(&torPortBegin, "tor-port-begin", 17001, "tor port begin")
-	flag.Parse()
-
-	log.Printf("tor:        %s", tor)
-	log.Printf("torData:    %s", torData)
-	log.Printf("num:        %d", num)
-	log.Printf("serverAddr: %s", serverAddr)
-	log.Printf("cores:      %d", cores)
-
-	log.Printf("Metasocks starting...")
-
-	runtime.GOMAXPROCS(cores)
-
-	if num == 0 {
-		log.Fatal("err: num must be great than zero")
-	}
-	metasocks.Run(serverAddr, tor, torData, torAddr, torPortBegin, num)
 }
