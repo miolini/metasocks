@@ -67,7 +67,7 @@ func (m *Metasocks) Run(serverAddr, tor, torData, torAddr string, torPortBegin i
 }
 
 func (m *Metasocks) runTor(torNum int, tor, addr, confPath string) {
-	var err error	
+	var err error
 	for !m.stopped {
 		log.Printf("tor instance %d starting...", torNum)
 		cmd := exec.Command(tor, "-f", confPath)
